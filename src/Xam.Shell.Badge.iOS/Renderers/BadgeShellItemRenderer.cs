@@ -1,9 +1,7 @@
 ﻿using AsyncAwaitBestPractices;
-using CoreFoundation;
-using System;
-using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
+using System.Threading.Tasks;
 using UIKit;
 using Xamarin.Forms;
 using Xamarin.Forms.Platform.iOS;
@@ -23,27 +21,30 @@ namespace Xam.Shell.Badge.iOS.Renderers
                 Badge.BackgroundColorProperty.PropertyName
             };
 
-        private readonly Dictionary<Guid, int> _tabRealIndexByItemId =
-            new Dictionary<Guid, int>();
-
         /// <summary>
         /// <inheritdoc/>
         /// </summary>
-        public BadgeShellItemRenderer(IShellContext context) : base(context) { }
+        public BadgeShellItemRenderer(IShellContext context)
+            : base(context)
+        {
+        }
 
         /// <summary>
-        /// Occures when view is about to appear.
+        /// Occurs when the view has appeared.
         /// </summary>
-        public override void ViewWillAppear(bool animated)
+        /// <param name="animated"></param>
+        public override async void ViewDidAppear(bool animated)
         {
-            base.ViewWillAppear(animated);
-
-            DispatchQueue.MainQueue.DispatchAsync(() =>
-            {
-                Device
-                    .InvokeOnMainThreadAsync(InitBadges)
-                    .SafeFireAndForget();
-            });
+            base.ViewDidAppear(animated);
+            /**
+             * This looks bad but it is necessary to force the execution to the
+             * right thread. The value of 1 is here because we have to have SOME
+             * value for the delay. If we make this too big (e.g. 500ms) then
+             * the renderer doesn't think it has a color and applies a default
+             * instead of picking up the specified color.
+             */
+            await Task.Delay(1);
+            Device.InvokeOnMainThreadAsync(this.InitBadges).SafeFireAndForget();
         }
 
         /// <summary>
@@ -54,83 +55,81 @@ namespace Xam.Shell.Badge.iOS.Renderers
             base.OnShellSectionPropertyChanged(sender, e);
 
             if (_applyPropertyNames.All(x => x != e.PropertyName))
+            {
                 return;
+            }
 
             Device
-                .InvokeOnMainThreadAsync(() =>
-                {
-                    var item = (ShellSection)sender;
-                    if (item.IsVisible)
-                    {
-                        var index = _tabRealIndexByItemId.GetValueOrDefault(item.Id, -1);
-                        UpdateBadge(item, index);
-                    }
-                })
+                .InvokeOnMainThreadAsync(() => this.UpdateBadge((ShellSection)sender))
                 .SafeFireAndForget();
         }
 
         private void InitBadges()
         {
-            _tabRealIndexByItemId.Clear();
-            for (int index = 0, filteredIndex = 0; index < ShellItem.Items.Count; index++)
+            for (var index = 0; index < this.ShellItem.Items.Count; index++)
             {
-                var item = ShellItem.Items.ElementAtOrDefault(index);
-                if (!item.IsVisible)
-                    continue;
-                _tabRealIndexByItemId[item.Id] = filteredIndex;
-                UpdateBadge(item, filteredIndex);
-                filteredIndex++;
+                this.UpdateBadge(this.ShellItem.Items.ElementAtOrDefault(index));
             }
         }
 
-        private void UpdateBadge(ShellSection item, int index)
+        private void UpdateBadge(ShellSection item)
         {
-            if (index < 0)
-                return;
-
-            var text = Badge.GetText(item);
+            int index = this.ShellItem.Items.IndexOf(item);
+            string text = Badge.GetText(item);
             var textColor = Badge.GetTextColor(item);
             var bg = Badge.GetBackgroundColor(item);
-            ApplyBadge(index, text, bg, textColor);
+            this.ApplyBadge(index, text, bg, textColor);
         }
 
         private void ApplyBadge(int index, string text, Color bg, Color textColor)
         {
-            if (TabBar.Items.Any())
+            if (this.TabBar.Items.Any())
             {
-                if (TabBar.Items.ElementAtOrDefault(index) is UITabBarItem currentTabBarItem)
+                int.TryParse(text, out int badgeValue);
+
+                if (!string.IsNullOrEmpty(text))
                 {
-                    int.TryParse(text, out var badgeValue);
-
-                    if (string.IsNullOrEmpty(text))
-                    {
-                        currentTabBarItem.BadgeValue = default;
-                        currentTabBarItem.BadgeColor = UIColor.Clear;
-                        return;
-                    }
-
                     if (badgeValue == 0)
                     {
-                        currentTabBarItem.BadgeValue = "●";
-                        currentTabBarItem.BadgeColor = UIColor.Clear;
-                        currentTabBarItem.SetBadgeTextAttributes(
-                            new UIStringAttributes
-                            {
-                                ForegroundColor = bg.ToUIColor()
-                            }, UIControlState.Normal);
+                        this.TabBar.Items[index].BadgeValue = string.Empty; // the dot character caused heartache
+                        this.TabBar.Items[index].BadgeColor = UIColor.Clear;
                     }
                     else
                     {
-                        currentTabBarItem.BadgeValue = text;
-                        currentTabBarItem.BadgeColor = bg.ToUIColor();
-                        currentTabBarItem.SetBadgeTextAttributes(
-                            new UIStringAttributes
-                            {
-                                ForegroundColor = textColor.ToUIColor()
-                            }, UIControlState.Normal);
+                        this.TabBar.Items[index].BadgeValue = text;
+                        this.TabBar.Items[index].BadgeColor = bg.ToUIColor();
                     }
+
+                    this.SetTabBarAppearance(bg.ToUIColor());
+                }
+                else
+                {
+                    this.TabBar.Items[index].BadgeValue = default;
+                    this.TabBar.Items[index].BadgeColor = UIColor.Clear;
                 }
             }
         }
+
+        private void SetTabBarAppearance(UIColor color)
+        {
+            if (UIDevice.CurrentDevice.CheckSystemVersion(13, 0))
+            {
+                var tabBarAppearance = this.TabBar.StandardAppearance.Copy() as UITabBarAppearance;
+
+                SetTabBarItemBadgeAppearance(tabBarAppearance.StackedLayoutAppearance, color);
+                SetTabBarItemBadgeAppearance(tabBarAppearance.InlineLayoutAppearance, color);
+                SetTabBarItemBadgeAppearance(tabBarAppearance.CompactInlineLayoutAppearance, color);
+
+                this.TabBar.StandardAppearance = tabBarAppearance;
+
+                if (UIDevice.CurrentDevice.CheckSystemVersion(15, 0))
+                {
+                    this.TabBar.ScrollEdgeAppearance = tabBarAppearance;
+                }
+            }
+        }
+
+        private static void SetTabBarItemBadgeAppearance(UITabBarItemAppearance appearance, UIColor color)
+            => appearance.Normal.BadgeBackgroundColor = color;
     }
 }
